@@ -20,12 +20,12 @@ jobs:
         name: Checkout source code
         with:
           fetch-depth: 1
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: "go.mod"
           cache: true
       - run: go mod download
       - name: Run linters
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
