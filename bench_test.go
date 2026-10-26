@@ -23,7 +23,9 @@ func BenchmarkEncrypt(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewLocalEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	payload := []byte("Sensitive customer document payload to encrypt in benchmark")
 	aad := []byte("tenant-benchmark-100")
@@ -51,7 +53,9 @@ func BenchmarkDecrypt(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewLocalEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	payload := []byte("Sensitive customer document payload to encrypt in benchmark")
 	aad := []byte("tenant-benchmark-100")
@@ -84,7 +88,9 @@ func BenchmarkEncryptBytes(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewLocalEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	payload := []byte("Sensitive customer document payload to encrypt in benchmark")
 	aad := []byte("tenant-benchmark-100")
@@ -112,7 +118,9 @@ func BenchmarkDecryptBytes(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewLocalEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	payload := []byte("Sensitive customer document payload to encrypt in benchmark")
 	aad := []byte("tenant-benchmark-100")
@@ -145,7 +153,9 @@ func BenchmarkDecryptWireBytes(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NewLocalEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	payload := []byte("Sensitive customer document payload to encrypt in benchmark")
 	aad := []byte("tenant-benchmark-100")

@@ -96,7 +96,9 @@ func LoadMountedSecret(path string, masterKey tink.AEAD) (*tinkkeyset.Handle, er
 	if err != nil {
 		return nil, fmt.Errorf("keyset: failed to open mounted secret %q: %w", path, err)
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	return LoadEncryptedKeyset(f, masterKey)
 }

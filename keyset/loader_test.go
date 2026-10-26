@@ -70,7 +70,9 @@ func TestKeysetLoadMountedSecret(t *testing.T) {
 	}
 
 	err = keyset.GenerateEncryptedKeyset(f, mockAEAD, keyset.XChaCha20Poly1305)
-	f.Close()
+	if closeErr := f.Close(); closeErr != nil {
+		t.Fatalf("failed to close file: %v", closeErr)
+	}
 	if err != nil {
 		t.Fatalf("GenerateEncryptedKeyset failed: %v", err)
 	}

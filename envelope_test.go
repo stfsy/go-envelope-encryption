@@ -40,7 +40,9 @@ func TestLocalEnvelopeEncryptDecrypt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocalEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	payload := []byte("Sensitive customer document payload")
 	aad := []byte("tenant-42-doc-99")
@@ -99,7 +101,9 @@ func TestDirectKMSEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDirectKMSEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	data := []byte("Cloud HSM direct payload")
 	aad := []byte("audit-log-ref")
@@ -135,7 +139,9 @@ func TestMountedSecretWithRotation(t *testing.T) {
 		t.Fatalf("failed to create file: %v", err)
 	}
 	err = keyset.GenerateEncryptedKeyset(v1File, mockKMS, keyset.AES256GCM)
-	v1File.Close()
+	if closeErr := v1File.Close(); closeErr != nil {
+		t.Fatalf("failed to close file: %v", closeErr)
+	}
 	if err != nil {
 		t.Fatalf("failed to write V1: %v", err)
 	}
@@ -145,7 +151,9 @@ func TestMountedSecretWithRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFromMountedSecret failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	doc1 := []byte("Document encrypted pre-rotation")
 	c1, err := client.Encrypt(ctx, doc1)
@@ -219,7 +227,9 @@ func TestAutoReloader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFromMountedSecret failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	doc1 := []byte("auto-reload doc1")
 	c1, err := client.Encrypt(ctx, doc1)
@@ -266,7 +276,9 @@ func TestConcurrentUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFromKeysetHandle failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	workers := 25
 	iterations := 50
@@ -307,7 +319,9 @@ func TestWireFormatEdgeCases(t *testing.T) {
 	ctx := context.Background()
 	mockKMS, _, _ := kms.NewMockKMSEncrypter("")
 	client, _ := envelope.NewDirectKMSEnvelope(mockKMS, keyset.AES256GCM)
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	// 1. Missing prefix
 	_, err := client.Decrypt(ctx, "invalid-prefix-payload")
@@ -343,7 +357,9 @@ func TestWireFormatEdgeCases(t *testing.T) {
 func TestContextCancellation(t *testing.T) {
 	mockKMS, _, _ := kms.NewMockKMSEncrypter("")
 	client, _ := envelope.NewDirectKMSEnvelope(mockKMS, keyset.AES256GCM)
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel context
@@ -399,7 +415,9 @@ func TestAutoReloaderErrorObservability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFromMountedSecret failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	// Overwrite with corrupted JSON to simulate bad secret sync
 	time.Sleep(30 * time.Millisecond)
@@ -441,7 +459,9 @@ func TestLocalEnvelopeFromMountedSecretWithRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocalEnvelopeFromMountedSecret failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	payload1 := []byte("payload before KEK rotation")
 	aad1 := []byte("aad-v1")
@@ -463,10 +483,12 @@ func TestLocalEnvelopeFromMountedSecretWithRotation(t *testing.T) {
 	}
 	var rotatedBuf bytes.Buffer
 	if err := keyset.RotateEncryptedKeyset(f, &rotatedBuf, mockKMS, keyset.AES256GCM); err != nil {
-		f.Close()
+		_ = f.Close()
 		t.Fatalf("keyset rotation failed: %v", err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatalf("failed to close secret: %v", err)
+	}
 
 	if err := os.WriteFile(secretPath, rotatedBuf.Bytes(), 0600); err != nil {
 		t.Fatalf("failed to overwrite rotated secret: %v", err)
@@ -517,7 +539,9 @@ func TestRejectMultipleAAD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDirectKMSEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	payload := []byte("secret payload")
 	aad1 := []byte("tenant-1")
@@ -568,7 +592,9 @@ func TestRejectOversizedEncrypt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDirectKMSEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	// 25 MiB payload will expand to > 32 MiB on wire
 	largePayload := make([]byte, 25*1024*1024)
@@ -618,7 +644,9 @@ func TestContextCancellationDirectReturn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDirectKMSEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // canceled immediately

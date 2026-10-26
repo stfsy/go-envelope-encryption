@@ -108,7 +108,7 @@ func decodeBase64String(payload string) ([]byte, error) {
 }
 
 func decodeBase64Bytes(payload []byte) ([]byte, error) {
-	isURLSafe := bytes.IndexAny(payload, "-_") != -1
+	isURLSafe := bytes.ContainsAny(payload, "-_")
 	isPadded := len(payload) > 0 && payload[len(payload)-1] == '='
 
 	var enc *base64.Encoding
