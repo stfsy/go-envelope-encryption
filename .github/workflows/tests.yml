@@ -1,0 +1,28 @@
+# Testing workflow
+name: tests
+
+# This GitHub action runs tests for each pull request and push.
+on:
+  push:
+
+# Testing only needs permissions to read the repository contents.
+permissions:
+  contents: read
+
+jobs:
+  # Ensure project builds before running testing matrix
+  unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        name: Checkout source code
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+          cache: true
+      - run: go mod download
+      - run: ./test.sh
