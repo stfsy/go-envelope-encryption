@@ -79,7 +79,7 @@ def main():
     try:
         with tempfile.NamedTemporaryFile("w", dir=out_dir, delete=False, prefix=".keyset-tmp-") as f:
             tmp_path = f.name
-            tink.write_keyset_handle(keyset_handle, tink.JsonKeysetWriter(f), master_aead)
+            keyset_handle.write(tink.JsonKeysetWriter(f), master_aead)
             f.flush()
             os.fsync(f.fileno())
 

@@ -82,7 +82,7 @@ def main():
     # 3. Read and unwrap existing keyset
     try:
         with open(args.in_file, "r") as f:
-            handle = tink.read_keyset_handle(tink.JsonKeysetReader(f), master_aead)
+            handle = tink.read_keyset_handle(tink.JsonKeysetReader(f.read()), master_aead)
     except Exception as e:
         print(f"Error reading and decrypting existing keyset {args.in_file}: {e}", file=sys.stderr)
         sys.exit(1)
@@ -103,7 +103,7 @@ def main():
     try:
         with tempfile.NamedTemporaryFile("w", dir=out_dir, delete=False, prefix=".keyset-rotate-tmp-") as f:
             tmp_path = f.name
-            tink.write_keyset_handle(rotated_handle, tink.JsonKeysetWriter(f), master_aead)
+            rotated_handle.write(tink.JsonKeysetWriter(f), master_aead)
             f.flush()
             os.fsync(f.fileno())
 
