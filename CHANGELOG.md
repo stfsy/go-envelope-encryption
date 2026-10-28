@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.1](https://github.com/stfsy/go-envelope-encryption/compare/v1.0.0...v1.0.1) (2026-10-28)
+
+
+### Features
+
+* **kms:** migrate to AWS SDK for Go v2 and add GCP KMS closer ([0235f7d](https://github.com/stfsy/go-envelope-encryption/commit/0235f7dbd959c9897c371792b6e863e4a3316ab9))
+
+
+### Bug Fixes
+
+* **envelope:** prevent reload tier downgrade, enforce size limits, and fix auto-reload TOCTOU ([906f8ba](https://github.com/stfsy/go-envelope-encryption/commit/906f8bac69553dc5bca813e361b11243d209a146))
+* **keyset:** harden template validation and add context-aware loading ([eea1d1a](https://github.com/stfsy/go-envelope-encryption/commit/eea1d1a20eb9818c2f7f905463a645e3411ca582))
+* **lint:** update lint.sh image and resolve static analysis findings ([1d54bde](https://github.com/stfsy/go-envelope-encryption/commit/1d54bdee041edf5dd6775997584d8dd2bf65f1c9))
+* **scripts:** fix helper scripts ([2ab2720](https://github.com/stfsy/go-envelope-encryption/commit/2ab2720afc43bd61b0a36ceb7613581a7852782a))
+
+
+### Miscellaneous Chores
+
+* ignore generated keysets ([f22ec5e](https://github.com/stfsy/go-envelope-encryption/commit/f22ec5e8e3265b9ccd3dcee07e33c83c4ffc4f85))
+
 ## [1.0.0](https://github.com/stfsy/go-envelope-encryption/compare/v0.1.0...v1.0.0) (2026-10-26)
 
 
