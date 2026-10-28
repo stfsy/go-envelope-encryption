@@ -90,7 +90,7 @@ func main() {
 	ctx := context.Background()
 
 	// 1. Connect to Cloud KMS Root Key (AWS KMS or GCP KMS)
-	kmsMaster, err := kms.NewAWSKMSEncrypter("aws-kms://arn:aws:kms:us-east-1:123456789012:key/my-kek-id")
+	kmsMaster, err := kms.NewAWSKMSEncrypter(ctx, "aws-kms://arn:aws:kms:us-east-1:123456789012:key/my-kek-id")
 	// Or GCP Cloud KMS:
 	// kmsMaster, err := kms.NewGCPKMSEncrypter(ctx, "gcp-kms://projects/my-proj/locations/global/keyRings/ring/cryptoKeys/kek")
 	if err != nil {
@@ -154,7 +154,7 @@ import (
 
 func main() {
 	ctx := context.Background()
-	kmsAEAD, _ := kms.NewAWSKMSEncrypter("aws-kms://arn:aws:kms:us-east-1:123456789012:key/my-kek-id")
+	kmsAEAD, _ := kms.NewAWSKMSEncrypter(ctx, "aws-kms://arn:aws:kms:us-east-1:123456789012:key/my-kek-id")
 
 	// Each record wraps an ephemeral DEK directly via remote AWS KMS RPC
 	client, err := envelope.NewDirectKMSEnvelope(kmsAEAD, keyset.AES256GCM)
