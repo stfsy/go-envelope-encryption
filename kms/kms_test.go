@@ -97,6 +97,7 @@ func TestKMSEncrypterInvalidURI(t *testing.T) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 
+	//nolint:staticcheck // SA1012: intentionally testing nil context rejection
 	_, err = kms.NewAWSKMSEncrypter(nil, "aws-kms://arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012")
 	if !errors.Is(err, kms.ErrKMSInitialization) {
 		t.Fatalf("expected ErrKMSInitialization for nil context, got %v", err)
@@ -112,6 +113,7 @@ func TestKMSEncrypterInvalidURI(t *testing.T) {
 		t.Fatalf("expected ErrInvalidURI for cross-provider GCP URI, got %v", err)
 	}
 
+	//nolint:staticcheck // SA1012: intentionally testing nil context rejection
 	_, err = kms.NewGCPKMSEncrypter(nil, "projects/p/locations/l/keyRings/r/cryptoKeys/k")
 	if !errors.Is(err, kms.ErrKMSInitialization) {
 		t.Fatalf("expected ErrKMSInitialization for nil context, got %v", err)

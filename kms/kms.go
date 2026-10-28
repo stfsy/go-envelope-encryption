@@ -232,14 +232,14 @@ func (g *gcpClosableAEAD) EncryptWithContext(ctx context.Context, plaintext, ass
 	if pwc, ok := g.AEAD.(tink.AEADWithContext); ok {
 		return pwc.EncryptWithContext(ctx, plaintext, associatedData)
 	}
-	return g.AEAD.Encrypt(plaintext, associatedData)
+	return g.Encrypt(plaintext, associatedData)
 }
 
 func (g *gcpClosableAEAD) DecryptWithContext(ctx context.Context, ciphertext, associatedData []byte) ([]byte, error) {
 	if pwc, ok := g.AEAD.(tink.AEADWithContext); ok {
 		return pwc.DecryptWithContext(ctx, ciphertext, associatedData)
 	}
-	return g.AEAD.Decrypt(ciphertext, associatedData)
+	return g.Decrypt(ciphertext, associatedData)
 }
 
 func (g *gcpClosableAEAD) Close() error {

@@ -691,7 +691,9 @@ func TestClientReloadNewSecretAndKMSKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFromMountedSecret failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	payload := []byte("hello world")
 	_, err = client.Encrypt(ctx, payload)
@@ -723,7 +725,9 @@ func TestClientReloadNewSecretAndKMSKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocalEnvelopeFromMountedSecret failed: %v", err)
 	}
-	defer localClient.Close()
+	defer func() {
+		_ = localClient.Close()
+	}()
 
 	if err := localClient.Reload(path2, mockKMS2); err != nil {
 		t.Fatalf("localClient Reload failed: %v", err)
@@ -761,7 +765,9 @@ func TestLocalEnvelopeReloadPreserves2Tier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocalEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	// Encrypt record 1 before reload
 	payload1 := []byte("record-1-data")
@@ -820,7 +826,9 @@ func TestDirectKMSEnvelopeReloadUnsupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDirectKMSEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	err = client.Reload("dummy.json", mockKMS)
 	if !errors.Is(err, envelope.ErrReloadUnsupported) {
@@ -834,7 +842,9 @@ func TestUnconfiguredReloadUnsupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	err = client.Reload("dummy.json", mockKMS)
 	if !errors.Is(err, envelope.ErrReloadUnsupported) {
@@ -849,7 +859,9 @@ func TestPayloadSizeChecks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDirectKMSEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	oversized := make([]byte, envelope.MaxRawCiphertextLen+1)
 
@@ -899,7 +911,9 @@ func TestAutoReloadSameSizeAndSameModTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFromMountedSecret failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	// Initial payload encrypt & decrypt
 	pt := []byte("secret-payload")
@@ -949,7 +963,9 @@ func FuzzEnvelopeDecrypt(f *testing.F) {
 	if err != nil {
 		f.Fatalf("NewDirectKMSEnvelope failed: %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+	}()
 
 	ctx := context.Background()
 

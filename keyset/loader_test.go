@@ -236,6 +236,7 @@ func TestKeysetContextCancellation(t *testing.T) {
 	}
 
 	// 2. LoadEncryptedKeysetWithContext with nil context
+	//nolint:staticcheck // SA1012: intentionally testing nil context rejection
 	_, err = keyset.LoadEncryptedKeysetWithContext(nil, bytes.NewReader(validBuf.Bytes()), mockAEAD)
 	if err == nil {
 		t.Fatal("expected error for nil context on LoadEncryptedKeysetWithContext")
@@ -254,6 +255,7 @@ func TestKeysetContextCancellation(t *testing.T) {
 	}
 
 	// 4. LoadMountedSecretWithContext with nil context and empty path
+	//nolint:staticcheck // SA1012: intentionally testing nil context rejection
 	_, err = keyset.LoadMountedSecretWithContext(nil, path, mockAEAD)
 	if err == nil {
 		t.Fatal("expected error for nil context on LoadMountedSecretWithContext")
