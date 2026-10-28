@@ -4,6 +4,7 @@ name: tests
 # This GitHub action runs tests for each pull request and push.
 on:
   push:
+  pull_request:
 
 # Testing only needs permissions to read the repository contents.
 permissions:
