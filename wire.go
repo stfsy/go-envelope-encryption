@@ -14,6 +14,8 @@ const (
 	Prefix = "$tink$"
 	// MaxCiphertextLen is the maximum allowable serialized envelope string length (32 MiB).
 	MaxCiphertextLen = 32 * 1024 * 1024
+	// MaxRawCiphertextLen is the maximum raw binary envelope length that fits within MaxCiphertextLen.
+	MaxRawCiphertextLen = (MaxCiphertextLen - len(Prefix)) / 4 * 3
 )
 
 var prefixBytes = []byte(Prefix)
@@ -56,7 +58,7 @@ func ParseWire(serialized string) ([]byte, error) {
 	payload := serialized[len(Prefix):]
 	b, err := decodeBase64String(payload)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidEncoding, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidEncoding, err)
 	}
 	return b, nil
 }
@@ -77,7 +79,7 @@ func ParseWireBytes(serialized []byte) ([]byte, error) {
 	payload := serialized[len(prefixBytes):]
 	b, err := decodeBase64Bytes(payload)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidEncoding, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidEncoding, err)
 	}
 	return b, nil
 }

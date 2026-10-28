@@ -325,20 +325,20 @@ func TestWireFormatEdgeCases(t *testing.T) {
 
 	// 1. Missing prefix
 	_, err := client.Decrypt(ctx, "invalid-prefix-payload")
-	if !errors.Is(err, envelope.ErrDecryptionFailed) {
-		t.Fatalf("expected ErrDecryptionFailed for missing prefix, got: %v", err)
+	if !errors.Is(err, envelope.ErrDecryptionFailed) || !errors.Is(err, envelope.ErrInvalidMagicPrefix) {
+		t.Fatalf("expected ErrDecryptionFailed and ErrInvalidMagicPrefix for missing prefix, got: %v", err)
 	}
 
 	// 2. Empty string
 	_, err = client.Decrypt(ctx, "")
-	if !errors.Is(err, envelope.ErrDecryptionFailed) {
-		t.Fatalf("expected ErrDecryptionFailed for empty string, got: %v", err)
+	if !errors.Is(err, envelope.ErrDecryptionFailed) || !errors.Is(err, envelope.ErrEmptyCiphertext) {
+		t.Fatalf("expected ErrDecryptionFailed and ErrEmptyCiphertext for empty string, got: %v", err)
 	}
 
 	// 3. Corrupted base64
 	_, err = client.Decrypt(ctx, "$tink$not-valid-base64!!!")
-	if !errors.Is(err, envelope.ErrDecryptionFailed) {
-		t.Fatalf("expected ErrDecryptionFailed for bad base64, got: %v", err)
+	if !errors.Is(err, envelope.ErrDecryptionFailed) || !errors.Is(err, envelope.ErrInvalidEncoding) {
+		t.Fatalf("expected ErrDecryptionFailed and ErrInvalidEncoding for bad base64, got: %v", err)
 	}
 
 	// 4. Nil plaintext
@@ -382,6 +382,17 @@ func TestContextCancellation(t *testing.T) {
 	_, err = client.DecryptBytes(ctx, []byte("payload"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled on DecryptBytes, got: %v", err)
+	}
+
+	// Pre-canceled context on mounted secret constructors
+	_, err = envelope.NewFromMountedSecret(ctx, "nonexistent.json", mockKMS)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled on NewFromMountedSecret, got: %v", err)
+	}
+
+	_, err = envelope.NewLocalEnvelopeFromMountedSecret(ctx, "nonexistent.json", mockKMS, keyset.AES256GCM)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled on NewLocalEnvelopeFromMountedSecret, got: %v", err)
 	}
 }
 
@@ -658,4 +669,303 @@ func TestContextCancellationDirectReturn(t *testing.T) {
 	if errors.Is(err, envelope.ErrDecryptionFailed) {
 		t.Fatalf("context cancellation should NOT be masked as ErrDecryptionFailed")
 	}
+}
+
+func TestClientReloadNewSecretAndKMSKey(t *testing.T) {
+	ctx := context.Background()
+	mockKMS1, _, _ := kms.NewMockKMSEncrypter("")
+	mockKMS2, _, _ := kms.NewMockKMSEncrypter("")
+
+	tmpDir := t.TempDir()
+	path1 := filepath.Join(tmpDir, "keyset1.json")
+	path2 := filepath.Join(tmpDir, "keyset2.json")
+
+	if err := os.WriteFile(path1, mustGenerateKeyset(t, mockKMS1), 0600); err != nil {
+		t.Fatalf("failed to write keyset 1: %v", err)
+	}
+	if err := os.WriteFile(path2, mustGenerateKeyset(t, mockKMS2), 0600); err != nil {
+		t.Fatalf("failed to write keyset 2: %v", err)
+	}
+
+	client, err := envelope.NewFromMountedSecret(ctx, path1, mockKMS1)
+	if err != nil {
+		t.Fatalf("NewFromMountedSecret failed: %v", err)
+	}
+	defer client.Close()
+
+	payload := []byte("hello world")
+	_, err = client.Encrypt(ctx, payload)
+	if err != nil {
+		t.Fatalf("Encrypt ct1 failed: %v", err)
+	}
+
+	// Reload with new path and new KMS key
+	if err := client.Reload(path2, mockKMS2); err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+
+	// Should be able to encrypt and decrypt with new keyset
+	ct2, err := client.Encrypt(ctx, payload)
+	if err != nil {
+		t.Fatalf("Encrypt ct2 failed: %v", err)
+	}
+
+	decrypted2, err := client.Decrypt(ctx, ct2)
+	if err != nil {
+		t.Fatalf("Decrypt ct2 failed: %v", err)
+	}
+	if !bytes.Equal(decrypted2, payload) {
+		t.Fatalf("payload mismatch")
+	}
+
+	// Test with NewLocalEnvelopeFromMountedSecret as well
+	localClient, err := envelope.NewLocalEnvelopeFromMountedSecret(ctx, path1, mockKMS1, keyset.AES256GCM)
+	if err != nil {
+		t.Fatalf("NewLocalEnvelopeFromMountedSecret failed: %v", err)
+	}
+	defer localClient.Close()
+
+	if err := localClient.Reload(path2, mockKMS2); err != nil {
+		t.Fatalf("localClient Reload failed: %v", err)
+	}
+	ctLocal, err := localClient.Encrypt(ctx, payload)
+	if err != nil {
+		t.Fatalf("localClient Encrypt failed: %v", err)
+	}
+	decLocal, err := localClient.Decrypt(ctx, ctLocal)
+	if err != nil {
+		t.Fatalf("localClient Decrypt failed: %v", err)
+	}
+	if !bytes.Equal(decLocal, payload) {
+		t.Fatalf("localClient payload mismatch")
+	}
+}
+
+func TestLocalEnvelopeReloadPreserves2Tier(t *testing.T) {
+	ctx := context.Background()
+	mockKMS, _, _ := kms.NewMockKMSEncrypter("")
+	tmpDir := t.TempDir()
+
+	// Initial KEK keyset
+	v1Data := mustGenerateKeyset(t, mockKMS)
+	kh1, err := keyset.LoadEncryptedKeyset(bytes.NewReader(v1Data), mockKMS)
+	if err != nil {
+		t.Fatalf("load keyset v1 failed: %v", err)
+	}
+	kek1, err := aead.New(kh1)
+	if err != nil {
+		t.Fatalf("aead.New kek1 failed: %v", err)
+	}
+
+	client, err := envelope.NewLocalEnvelope(kek1, keyset.AES256GCM)
+	if err != nil {
+		t.Fatalf("NewLocalEnvelope failed: %v", err)
+	}
+	defer client.Close()
+
+	// Encrypt record 1 before reload
+	payload1 := []byte("record-1-data")
+	ct1, err := client.Encrypt(ctx, payload1)
+	if err != nil {
+		t.Fatalf("Encrypt 1 failed: %v", err)
+	}
+
+	// Rotate keyset: write rotated keyset to file (containing both key1 and key2)
+	rotBuf := new(bytes.Buffer)
+	if err := keyset.RotateEncryptedKeyset(bytes.NewReader(v1Data), rotBuf, mockKMS, keyset.AES256GCM); err != nil {
+		t.Fatalf("RotateEncryptedKeyset failed: %v", err)
+	}
+	rotPath := filepath.Join(tmpDir, "rotated.json")
+	if err := os.WriteFile(rotPath, rotBuf.Bytes(), 0600); err != nil {
+		t.Fatalf("write rotated keyset failed: %v", err)
+	}
+
+	// Calling Reload on NewLocalEnvelope with rotated secret path & KMS key
+	if err := client.Reload(rotPath, mockKMS); err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+
+	// Calling Reload with empty path should return ErrReloadUnsupported
+	if err := client.Reload("", nil); !errors.Is(err, envelope.ErrReloadUnsupported) {
+		t.Fatalf("expected ErrReloadUnsupported on empty path reload, got: %v", err)
+	}
+
+	// 1. Decrypt historical record 1
+	dec1, err := client.Decrypt(ctx, ct1)
+	if err != nil {
+		t.Fatalf("failed to decrypt pre-reload record: %v", err)
+	}
+	if !bytes.Equal(dec1, payload1) {
+		t.Fatalf("payload 1 mismatch")
+	}
+
+	// 2. Encrypt record 2 after reload
+	payload2 := []byte("record-2-data")
+	ct2, err := client.Encrypt(ctx, payload2)
+	if err != nil {
+		t.Fatalf("Encrypt 2 failed: %v", err)
+	}
+	dec2, err := client.Decrypt(ctx, ct2)
+	if err != nil {
+		t.Fatalf("Decrypt 2 failed: %v", err)
+	}
+	if !bytes.Equal(dec2, payload2) {
+		t.Fatalf("payload 2 mismatch")
+	}
+}
+
+func TestDirectKMSEnvelopeReloadUnsupported(t *testing.T) {
+	mockKMS, _, _ := kms.NewMockKMSEncrypter("")
+	client, err := envelope.NewDirectKMSEnvelope(mockKMS, keyset.AES256GCM)
+	if err != nil {
+		t.Fatalf("NewDirectKMSEnvelope failed: %v", err)
+	}
+	defer client.Close()
+
+	err = client.Reload("dummy.json", mockKMS)
+	if !errors.Is(err, envelope.ErrReloadUnsupported) {
+		t.Fatalf("expected ErrReloadUnsupported on DirectKMSEnvelope.Reload, got: %v", err)
+	}
+}
+
+func TestUnconfiguredReloadUnsupported(t *testing.T) {
+	mockKMS, _, _ := kms.NewMockKMSEncrypter("")
+	client, err := envelope.New(mockKMS)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer client.Close()
+
+	err = client.Reload("dummy.json", mockKMS)
+	if !errors.Is(err, envelope.ErrReloadUnsupported) {
+		t.Fatalf("expected ErrReloadUnsupported on unconfigured Reload, got: %v", err)
+	}
+}
+
+func TestPayloadSizeChecks(t *testing.T) {
+	ctx := context.Background()
+	mockKMS, _, _ := kms.NewMockKMSEncrypter("")
+	client, err := envelope.NewDirectKMSEnvelope(mockKMS, keyset.AES256GCM)
+	if err != nil {
+		t.Fatalf("NewDirectKMSEnvelope failed: %v", err)
+	}
+	defer client.Close()
+
+	oversized := make([]byte, envelope.MaxRawCiphertextLen+1)
+
+	// 1. EncryptBytes oversized plaintext
+	_, err = client.EncryptBytes(ctx, oversized)
+	if !errors.Is(err, envelope.ErrCiphertextTooLarge) {
+		t.Fatalf("expected ErrCiphertextTooLarge on EncryptBytes, got: %v", err)
+	}
+
+	// 2. Encrypt oversized plaintext
+	_, err = client.Encrypt(ctx, oversized)
+	if !errors.Is(err, envelope.ErrCiphertextTooLarge) {
+		t.Fatalf("expected ErrCiphertextTooLarge on Encrypt, got: %v", err)
+	}
+
+	// 3. DecryptBytes oversized ciphertext
+	_, err = client.DecryptBytes(ctx, oversized)
+	if !errors.Is(err, envelope.ErrCiphertextTooLarge) || !errors.Is(err, envelope.ErrDecryptionFailed) {
+		t.Fatalf("expected ErrDecryptionFailed wrapping ErrCiphertextTooLarge on DecryptBytes, got: %v", err)
+	}
+}
+
+func TestAutoReloadSameSizeAndSameModTime(t *testing.T) {
+	ctx := context.Background()
+	mockKMS, _, _ := kms.NewMockKMSEncrypter("")
+	tmpDir := t.TempDir()
+	secretPath := filepath.Join(tmpDir, "keyset.json")
+
+	// Initial keyset V1
+	v1Data := mustGenerateKeyset(t, mockKMS)
+	if err := os.WriteFile(secretPath, v1Data, 0600); err != nil {
+		t.Fatalf("failed to write initial keyset: %v", err)
+	}
+
+	fi1, err := os.Stat(secretPath)
+	if err != nil {
+		t.Fatalf("stat failed: %v", err)
+	}
+	initialModTime := fi1.ModTime()
+
+	client, err := envelope.NewFromMountedSecret(
+		ctx,
+		secretPath,
+		mockKMS,
+		envelope.WithAutoReload(20*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("NewFromMountedSecret failed: %v", err)
+	}
+	defer client.Close()
+
+	// Initial payload encrypt & decrypt
+	pt := []byte("secret-payload")
+	ct1, err := client.Encrypt(ctx, pt)
+	if err != nil {
+		t.Fatalf("Encrypt 1 failed: %v", err)
+	}
+
+	// Generate different keyset V2 with identical size
+	v2Data := mustGenerateKeyset(t, mockKMS)
+	for len(v2Data) < len(v1Data) {
+		v2Data = append(v2Data, ' ')
+	}
+	for len(v1Data) < len(v2Data) {
+		v1Data = append(v1Data, ' ')
+	}
+	if len(v2Data) != len(v1Data) {
+		v2Data = v2Data[:len(v1Data)]
+	}
+
+	// Write new data and force exact same ModTime
+	if err := os.WriteFile(secretPath, v2Data, 0600); err != nil {
+		t.Fatalf("failed to write v2 data: %v", err)
+	}
+	_ = os.Chtimes(secretPath, initialModTime, initialModTime)
+
+	// Wait for auto-reloader to pick up hash change and reload
+	var reloaded bool
+	for start := time.Now(); time.Since(start) < 2*time.Second; {
+		time.Sleep(50 * time.Millisecond)
+		// Encrypt with client - if reloaded to V2, ct1 (encrypted with V1) will fail to decrypt!
+		_, decErr := client.Decrypt(ctx, ct1)
+		if decErr != nil {
+			reloaded = true
+			break
+		}
+	}
+
+	if !reloaded {
+		t.Fatal("expected auto-reloader to detect hash change and reload even with identical size and modtime")
+	}
+}
+
+func FuzzEnvelopeDecrypt(f *testing.F) {
+	mockKMS, _, _ := kms.NewMockKMSEncrypter("")
+	client, err := envelope.NewDirectKMSEnvelope(mockKMS, keyset.AES256GCM)
+	if err != nil {
+		f.Fatalf("NewDirectKMSEnvelope failed: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+
+	// Seed valid envelope
+	validCT, err := client.Encrypt(ctx, []byte("fuzz seed payload"), []byte("seed-aad"))
+	if err != nil {
+		f.Fatalf("seed Encrypt failed: %v", err)
+	}
+
+	f.Add([]byte(validCT), []byte("seed-aad"))
+	f.Add([]byte("$tink$AAA"), []byte(""))
+	f.Add([]byte("not-even-tink"), []byte(""))
+	f.Add([]byte(""), []byte(""))
+
+	f.Fuzz(func(t *testing.T, wire []byte, aad []byte) {
+		_, _ = client.DecryptWireBytes(ctx, wire, aad)
+		_, _ = client.Decrypt(ctx, string(wire), aad)
+	})
 }

@@ -2,6 +2,7 @@ package envelope
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -29,14 +30,28 @@ var (
 	ErrClientClosed = errors.New("envelope: client is closed")
 	// ErrInvalidAAD is returned when more than one AAD slice is passed to an operation.
 	ErrInvalidAAD = errors.New("envelope: at most one AAD slice may be provided")
+	// ErrNilContext is returned when a nil context.Context is passed to an operation.
+	ErrNilContext = errors.New("envelope: context cannot be nil")
+	// ErrReloadUnsupported is returned when Reload is called on a client that does not support keyset reload.
+	ErrReloadUnsupported = errors.New("envelope: client does not support keyset reload")
 )
+
+func checkCtx(ctx context.Context) error {
+	if ctx == nil {
+		return ErrNilContext
+	}
+	return ctx.Err()
+}
 
 type options struct {
 	autoReloadInterval time.Duration
 	secretPath         string
 	kmsMaster          tink.AEAD
 	onReloadError      func(error)
-	reloader           func() (tink.AEAD, error)
+	reloader           func(secretPath string, kmsKey tink.AEAD) (tink.AEAD, error)
+	initialModTime     time.Time
+	initialSize        int64
+	initialDigest      [32]byte
 }
 
 // Option configures Client behavior.
@@ -56,7 +71,7 @@ func WithReloadErrorHandler(fn func(error)) Option {
 	}
 }
 
-func withReloader(fn func() (tink.AEAD, error)) Option {
+func withReloader(fn func(secretPath string, kmsKey tink.AEAD) (tink.AEAD, error)) Option {
 	return func(o *options) {
 		o.reloader = fn
 	}
@@ -69,13 +84,22 @@ func withSecretMount(secretPath string, kmsKey tink.AEAD) Option {
 	}
 }
 
+func withInitialStats(modTime time.Time, size int64, digest [32]byte) Option {
+	return func(o *options) {
+		o.initialModTime = modTime
+		o.initialSize = size
+		o.initialDigest = digest
+	}
+}
+
 // Client provides envelope encryption and decryption with modular wire formatting,
 // automatic keyset rotation, and optional secret mount hot-reloading.
 type Client struct {
 	primitive    atomic.Pointer[tink.AEAD]
 	closed       atomic.Bool
 	stopReloader chan struct{}
-	reloader     func() (tink.AEAD, error)
+	reloaderWG   sync.WaitGroup
+	reloader     func(secretPath string, kmsKey tink.AEAD) (tink.AEAD, error)
 	reloadMu     sync.Mutex
 }
 
@@ -98,8 +122,8 @@ func New(primitive tink.AEAD, opts ...Option) (*Client, error) {
 	}
 	c.primitive.Store(&primitive)
 
-	if o.autoReloadInterval > 0 && (o.secretPath != "" || o.reloader != nil) {
-		c.startAutoReloader(o.secretPath, o.kmsMaster, o.autoReloadInterval, o.onReloadError)
+	if o.autoReloadInterval > 0 && o.secretPath != "" {
+		c.startAutoReloader(o.secretPath, o.kmsMaster, o.autoReloadInterval, o.onReloadError, o.initialModTime, o.initialSize, o.initialDigest)
 	}
 
 	return c, nil
@@ -129,26 +153,67 @@ func NewFromEncryptedKeyset(r io.Reader, kmsKey tink.AEAD, opts ...Option) (*Cli
 // NewFromMountedSecret loads and unwraps a KMS-encrypted keyset JSON from a mounted file path.
 // If WithAutoReload is passed, the file will be periodically checked for updates and hot-reloaded.
 func NewFromMountedSecret(ctx context.Context, secretPath string, kmsKey tink.AEAD, opts ...Option) (*Client, error) {
-	loadFn := func() (tink.AEAD, error) {
-		handle, err := keyset.LoadMountedSecret(secretPath, kmsKey)
+	if err := checkCtx(ctx); err != nil {
+		return nil, err
+	}
+	if secretPath == "" {
+		return nil, keyset.ErrEmptyPath
+	}
+	if kmsKey == nil {
+		return nil, keyset.ErrNilMasterKey
+	}
+
+	handle, err := keyset.LoadMountedSecretWithContext(ctx, secretPath, kmsKey)
+	if err != nil {
+		return nil, err
+	}
+	primitive, err := aead.New(handle)
+	if err != nil {
+		return nil, fmt.Errorf("envelope: failed to instantiate AEAD: %w", err)
+	}
+
+	var initModTime time.Time
+	var initSize int64
+	var initDigest [32]byte
+	if data, readErr := readBoundedFile(secretPath); readErr == nil {
+		initDigest = sha256.Sum256(data)
+		if fi, statErr := os.Stat(secretPath); statErr == nil {
+			initModTime = fi.ModTime()
+			initSize = fi.Size()
+		}
+	}
+
+	var mu sync.Mutex
+	currentPath := secretPath
+	currentKey := kmsKey
+
+	loadFn := func(path string, key tink.AEAD) (tink.AEAD, error) {
+		mu.Lock()
+		if path != "" {
+			currentPath = path
+		}
+		if key != nil {
+			currentKey = key
+		}
+		p := currentPath
+		k := currentKey
+		mu.Unlock()
+
+		h, err := keyset.LoadMountedSecret(p, k)
 		if err != nil {
 			return nil, err
 		}
-		primitive, err := aead.New(handle)
+		prim, err := aead.New(h)
 		if err != nil {
 			return nil, fmt.Errorf("envelope: failed to instantiate AEAD: %w", err)
 		}
-		return primitive, nil
-	}
-
-	primitive, err := loadFn()
-	if err != nil {
-		return nil, err
+		return prim, nil
 	}
 
 	clientOpts := append([]Option{
 		withReloader(loadFn),
 		withSecretMount(secretPath, kmsKey),
+		withInitialStats(initModTime, initSize, initDigest),
 	}, opts...)
 
 	return New(primitive, clientOpts...)
@@ -167,9 +232,10 @@ func buildLocalEnvelopeAEAD(kekAEAD tink.AEAD, dekTemplate *tinkpb.KeyTemplate) 
 	}
 	if pwc, ok := kekAEAD.(tink.AEADWithContext); ok {
 		primitive, err := aead.NewKMSEnvelopeAEADWithContext(dekTemplate, pwc)
-		if err == nil {
-			return &aeadWithContextAdapter{p: primitive}, nil
+		if err != nil {
+			return nil, err
 		}
+		return &aeadWithContextAdapter{p: primitive}, nil
 	}
 	return aead.NewKMSEnvelopeAEAD2(dekTemplate, kekAEAD), nil
 }
@@ -181,7 +247,24 @@ func NewLocalEnvelope(kekAEAD tink.AEAD, dekTemplate *tinkpb.KeyTemplate, opts .
 	if err != nil {
 		return nil, err
 	}
-	return New(primitive, opts...)
+
+	localReloader := func(secretPath string, kmsKey tink.AEAD) (tink.AEAD, error) {
+		if secretPath == "" || kmsKey == nil {
+			return nil, ErrReloadUnsupported
+		}
+		handle, err := keyset.LoadMountedSecret(secretPath, kmsKey)
+		if err != nil {
+			return nil, err
+		}
+		newKEK, err := aead.New(handle)
+		if err != nil {
+			return nil, fmt.Errorf("envelope: failed to instantiate KEK AEAD: %w", err)
+		}
+		return buildLocalEnvelopeAEAD(newKEK, dekTemplate)
+	}
+
+	clientOpts := append([]Option{withReloader(localReloader)}, opts...)
+	return New(primitive, clientOpts...)
 }
 
 // NewLocalEnvelopeFromMountedSecret initializes a 2-tier local envelope client where the KEK keyset
@@ -189,30 +272,74 @@ func NewLocalEnvelope(kekAEAD tink.AEAD, dekTemplate *tinkpb.KeyTemplate, opts .
 // If WithAutoReload is passed, secretPath is periodically monitored for rotated KEK keysets,
 // preserving the 2-tier envelope wrapping across reloads without cryptographic drift.
 func NewLocalEnvelopeFromMountedSecret(ctx context.Context, secretPath string, kmsKey tink.AEAD, dekTemplate *tinkpb.KeyTemplate, opts ...Option) (*Client, error) {
+	if err := checkCtx(ctx); err != nil {
+		return nil, err
+	}
+	if secretPath == "" {
+		return nil, keyset.ErrEmptyPath
+	}
+	if kmsKey == nil {
+		return nil, keyset.ErrNilMasterKey
+	}
 	if dekTemplate == nil {
 		dekTemplate = keyset.AES256GCM
 	}
 
-	loadFn := func() (tink.AEAD, error) {
-		handle, err := keyset.LoadMountedSecret(secretPath, kmsKey)
+	handle, err := keyset.LoadMountedSecretWithContext(ctx, secretPath, kmsKey)
+	if err != nil {
+		return nil, err
+	}
+	kekAEAD, err := aead.New(handle)
+	if err != nil {
+		return nil, fmt.Errorf("envelope: failed to instantiate KEK AEAD: %w", err)
+	}
+	primitive, err := buildLocalEnvelopeAEAD(kekAEAD, dekTemplate)
+	if err != nil {
+		return nil, err
+	}
+
+	var initModTime time.Time
+	var initSize int64
+	var initDigest [32]byte
+	if data, readErr := readBoundedFile(secretPath); readErr == nil {
+		initDigest = sha256.Sum256(data)
+		if fi, statErr := os.Stat(secretPath); statErr == nil {
+			initModTime = fi.ModTime()
+			initSize = fi.Size()
+		}
+	}
+
+	var mu sync.Mutex
+	currentPath := secretPath
+	currentKey := kmsKey
+
+	loadFn := func(path string, key tink.AEAD) (tink.AEAD, error) {
+		mu.Lock()
+		if path != "" {
+			currentPath = path
+		}
+		if key != nil {
+			currentKey = key
+		}
+		p := currentPath
+		k := currentKey
+		mu.Unlock()
+
+		h, err := keyset.LoadMountedSecret(p, k)
 		if err != nil {
 			return nil, err
 		}
-		kekAEAD, err := aead.New(handle)
+		newKEK, err := aead.New(h)
 		if err != nil {
 			return nil, fmt.Errorf("envelope: failed to instantiate KEK AEAD: %w", err)
 		}
-		return buildLocalEnvelopeAEAD(kekAEAD, dekTemplate)
-	}
-
-	primitive, err := loadFn()
-	if err != nil {
-		return nil, err
+		return buildLocalEnvelopeAEAD(newKEK, dekTemplate)
 	}
 
 	clientOpts := append([]Option{
 		withReloader(loadFn),
 		withSecretMount(secretPath, kmsKey),
+		withInitialStats(initModTime, initSize, initDigest),
 	}, opts...)
 
 	return New(primitive, clientOpts...)
@@ -230,14 +357,24 @@ func NewDirectKMSEnvelope(kmsAEAD tink.AEAD, dekTemplate *tinkpb.KeyTemplate, op
 	if err := keyset.ValidateAEADTemplate(dekTemplate); err != nil {
 		return nil, err
 	}
+
+	var primitive tink.AEAD
 	if pwc, ok := kmsAEAD.(tink.AEADWithContext); ok {
-		primitive, err := aead.NewKMSEnvelopeAEADWithContext(dekTemplate, pwc)
-		if err == nil {
-			return New(&aeadWithContextAdapter{p: primitive}, opts...)
+		envelopeAEAD, err := aead.NewKMSEnvelopeAEADWithContext(dekTemplate, pwc)
+		if err != nil {
+			return nil, err
 		}
+		primitive = &aeadWithContextAdapter{p: envelopeAEAD}
+	} else {
+		primitive = aead.NewKMSEnvelopeAEAD2(dekTemplate, kmsAEAD)
 	}
-	primitive := aead.NewKMSEnvelopeAEAD2(dekTemplate, kmsAEAD)
-	return New(primitive, opts...)
+
+	directReloader := func(string, tink.AEAD) (tink.AEAD, error) {
+		return nil, ErrReloadUnsupported
+	}
+
+	clientOpts := append([]Option{withReloader(directReloader)}, opts...)
+	return New(primitive, clientOpts...)
 }
 
 var bgCtx = context.Background()
@@ -276,6 +413,15 @@ func (c *Client) getPrimitive() (tink.AEAD, error) {
 // Encrypt encrypts plaintext with optional AAD and returns a modular wire string:
 // $tink$<base64_standard>
 func (c *Client) Encrypt(ctx context.Context, plaintext []byte, aad ...[]byte) (string, error) {
+	if err := checkCtx(ctx); err != nil {
+		return "", err
+	}
+	if plaintext == nil {
+		return "", ErrNilPlaintext
+	}
+	if len(plaintext) > MaxRawCiphertextLen {
+		return "", ErrCiphertextTooLarge
+	}
 	raw, err := c.EncryptBytes(ctx, plaintext, aad...)
 	if err != nil {
 		return "", err
@@ -288,7 +434,7 @@ func (c *Client) Encrypt(ctx context.Context, plaintext []byte, aad ...[]byte) (
 
 // Decrypt decodes a $tink$<base64> string and decrypts the underlying payload.
 func (c *Client) Decrypt(ctx context.Context, ciphertext string, aad ...[]byte) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkCtx(ctx); err != nil {
 		return nil, err
 	}
 	if len(aad) > 1 {
@@ -296,7 +442,7 @@ func (c *Client) Decrypt(ctx context.Context, ciphertext string, aad ...[]byte) 
 	}
 	raw, err := ParseWire(ciphertext)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrDecryptionFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrDecryptionFailed, err)
 	}
 	return c.DecryptBytes(ctx, raw, aad...)
 }
@@ -305,7 +451,7 @@ func (c *Client) Decrypt(ctx context.Context, ciphertext string, aad ...[]byte) 
 // This is the zero-string-allocation fast-path for callers receiving byte slices from HTTP request
 // bodies or database drivers.
 func (c *Client) DecryptWireBytes(ctx context.Context, wire []byte, aad ...[]byte) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkCtx(ctx); err != nil {
 		return nil, err
 	}
 	if len(aad) > 1 {
@@ -313,7 +459,7 @@ func (c *Client) DecryptWireBytes(ctx context.Context, wire []byte, aad ...[]byt
 	}
 	raw, err := ParseWireBytes(wire)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrDecryptionFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrDecryptionFailed, err)
 	}
 	return c.DecryptBytes(ctx, raw, aad...)
 }
@@ -330,11 +476,14 @@ func extractAAD(aad [][]byte) ([]byte, error) {
 
 // EncryptBytes encrypts plaintext with optional AAD, returning raw envelope bytes.
 func (c *Client) EncryptBytes(ctx context.Context, plaintext []byte, aad ...[]byte) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkCtx(ctx); err != nil {
 		return nil, err
 	}
 	if plaintext == nil {
 		return nil, ErrNilPlaintext
+	}
+	if len(plaintext) > MaxRawCiphertextLen {
+		return nil, ErrCiphertextTooLarge
 	}
 	extraAAD, err := extractAAD(aad)
 	if err != nil {
@@ -353,11 +502,14 @@ func (c *Client) EncryptBytes(ctx context.Context, plaintext []byte, aad ...[]by
 
 // DecryptBytes decrypts raw envelope bytes with optional AAD.
 func (c *Client) DecryptBytes(ctx context.Context, ciphertext []byte, aad ...[]byte) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkCtx(ctx); err != nil {
 		return nil, err
 	}
 	if len(ciphertext) == 0 {
 		return nil, ErrEmptyCiphertext
+	}
+	if len(ciphertext) > MaxRawCiphertextLen {
+		return nil, fmt.Errorf("%w: %w", ErrDecryptionFailed, ErrCiphertextTooLarge)
 	}
 	extraAAD, err := extractAAD(aad)
 	if err != nil {
@@ -398,22 +550,11 @@ func (c *Client) Reload(secretPath string, kmsKey tink.AEAD) error {
 		return ErrClientClosed
 	}
 
-	var newPrimitive tink.AEAD
-	var err error
-
-	if c.reloader != nil {
-		newPrimitive, err = c.reloader()
-	} else {
-		handle, loadErr := keyset.LoadMountedSecret(secretPath, kmsKey)
-		if loadErr != nil {
-			return loadErr
-		}
-		newPrimitive, err = aead.New(handle)
-		if err != nil {
-			return fmt.Errorf("envelope: failed to instantiate reloaded AEAD: %w", err)
-		}
+	if c.reloader == nil {
+		return ErrReloadUnsupported
 	}
 
+	newPrimitive, err := c.reloader(secretPath, kmsKey)
 	if err != nil {
 		return err
 	}
@@ -422,17 +563,44 @@ func (c *Client) Reload(secretPath string, kmsKey tink.AEAD) error {
 	return nil
 }
 
-func (c *Client) startAutoReloader(path string, kmsKey tink.AEAD, interval time.Duration, onErr func(error)) {
-	ticker := time.NewTicker(interval)
-	var lastModTime time.Time
-	var lastSize int64
+func readBoundedFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+	return io.ReadAll(io.LimitReader(f, keyset.MaxKeysetJSONSize+1))
+}
 
-	if fi, err := os.Stat(path); err == nil {
-		lastModTime = fi.ModTime()
-		lastSize = fi.Size()
+func (c *Client) startAutoReloader(
+	path string,
+	kmsKey tink.AEAD,
+	interval time.Duration,
+	onErr func(error),
+	initialModTime time.Time,
+	initialSize int64,
+	initialDigest [32]byte,
+) {
+	ticker := time.NewTicker(interval)
+	lastModTime := initialModTime
+	lastSize := initialSize
+	lastDigest := initialDigest
+
+	if lastModTime.IsZero() && lastSize == 0 && lastDigest == [32]byte{} {
+		if fi, err := os.Stat(path); err == nil {
+			lastModTime = fi.ModTime()
+			lastSize = fi.Size()
+		}
+		if data, err := readBoundedFile(path); err == nil {
+			lastDigest = sha256.Sum256(data)
+		}
 	}
 
+	c.reloaderWG.Add(1)
 	go func() {
+		defer c.reloaderWG.Done()
 		defer ticker.Stop()
 		for {
 			select {
@@ -444,7 +612,11 @@ func (c *Client) startAutoReloader(path string, kmsKey tink.AEAD, interval time.
 					// In Kubernetes / Cloud Run, secret volume updates atomically swap symlinks (..data_tmp -> ..data).
 					// A stat right during the swap can transiently return os.ErrNotExist.
 					// We retry once after a short delay before calling onErr.
-					time.Sleep(50 * time.Millisecond)
+					select {
+					case <-c.stopReloader:
+						return
+					case <-time.After(50 * time.Millisecond):
+					}
 					fi, err = os.Stat(path)
 					if err != nil {
 						if onErr != nil {
@@ -454,14 +626,24 @@ func (c *Client) startAutoReloader(path string, kmsKey tink.AEAD, interval time.
 					}
 				}
 
-				if !fi.ModTime().Equal(lastModTime) || fi.Size() != lastSize {
+				data, readErr := readBoundedFile(path)
+				if readErr != nil {
+					if onErr != nil {
+						onErr(readErr)
+					}
+					continue
+				}
+				digest := sha256.Sum256(data)
+
+				if !fi.ModTime().Equal(lastModTime) || fi.Size() != lastSize || digest != lastDigest {
 					if err := c.Reload(path, kmsKey); err != nil {
-						if onErr != nil {
+						if onErr != nil && !errors.Is(err, ErrClientClosed) {
 							onErr(err)
 						}
 					} else {
 						lastModTime = fi.ModTime()
 						lastSize = fi.Size()
+						lastDigest = digest
 					}
 				}
 			}
@@ -473,7 +655,10 @@ func (c *Client) startAutoReloader(path string, kmsKey tink.AEAD, interval time.
 func (c *Client) Close() error {
 	if c.closed.CompareAndSwap(false, true) {
 		close(c.stopReloader)
+		c.reloaderWG.Wait()
+		c.reloadMu.Lock()
 		c.primitive.Store(nil)
+		c.reloadMu.Unlock()
 	}
 	return nil
 }
