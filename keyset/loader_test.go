@@ -2,6 +2,7 @@ package keyset_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -191,6 +192,76 @@ func TestRejectNonAEADTemplate(t *testing.T) {
 	err = keyset.RotateEncryptedKeyset(bytes.NewReader(validBuf.Bytes()), outBuf, mockAEAD, badTemplate)
 	if !errors.Is(err, keyset.ErrUnsupportedKeyType) {
 		t.Fatalf("expected ErrUnsupportedKeyType on Rotate, got: %v", err)
+	}
+}
+
+func TestValidateAEADTemplateNilAndMalformed(t *testing.T) {
+	// 1. nil template must be rejected
+	err := keyset.ValidateAEADTemplate(nil)
+	if !errors.Is(err, keyset.ErrUnsupportedKeyType) {
+		t.Fatalf("expected ErrUnsupportedKeyType for nil template, got: %v", err)
+	}
+
+	// 2. Valid TypeUrl but empty/corrupt Value
+	corruptTemplate := &tinkpb.KeyTemplate{
+		TypeUrl: "type.googleapis.com/google.crypto.tink.AesGcmKey",
+		Value:   []byte("invalid-protobuf-bytes"),
+	}
+	err = keyset.ValidateAEADTemplate(corruptTemplate)
+	if !errors.Is(err, keyset.ErrUnsupportedKeyType) {
+		t.Fatalf("expected ErrUnsupportedKeyType for malformed template Value, got: %v", err)
+	}
+
+	// 3. Valid templates
+	if err := keyset.ValidateAEADTemplate(keyset.AES256GCM); err != nil {
+		t.Fatalf("expected AES256GCM to be valid, got: %v", err)
+	}
+	if err := keyset.ValidateAEADTemplate(keyset.XChaCha20Poly1305); err != nil {
+		t.Fatalf("expected XChaCha20Poly1305 to be valid, got: %v", err)
+	}
+}
+
+func TestKeysetContextCancellation(t *testing.T) {
+	mockAEAD, _, _ := kms.NewMockKMSEncrypter("")
+	validBuf := new(bytes.Buffer)
+	_ = keyset.GenerateEncryptedKeyset(validBuf, mockAEAD, keyset.AES256GCM)
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// 1. LoadEncryptedKeysetWithContext with canceled context
+	_, err := keyset.LoadEncryptedKeysetWithContext(canceledCtx, bytes.NewReader(validBuf.Bytes()), mockAEAD)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+
+	// 2. LoadEncryptedKeysetWithContext with nil context
+	_, err = keyset.LoadEncryptedKeysetWithContext(nil, bytes.NewReader(validBuf.Bytes()), mockAEAD)
+	if err == nil {
+		t.Fatal("expected error for nil context on LoadEncryptedKeysetWithContext")
+	}
+
+	// 3. LoadMountedSecretWithContext with canceled context
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "secret.json")
+	if err := os.WriteFile(path, validBuf.Bytes(), 0600); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+
+	_, err = keyset.LoadMountedSecretWithContext(canceledCtx, path, mockAEAD)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled on LoadMountedSecretWithContext, got: %v", err)
+	}
+
+	// 4. LoadMountedSecretWithContext with nil context and empty path
+	_, err = keyset.LoadMountedSecretWithContext(nil, path, mockAEAD)
+	if err == nil {
+		t.Fatal("expected error for nil context on LoadMountedSecretWithContext")
+	}
+
+	_, err = keyset.LoadMountedSecretWithContext(context.Background(), "", mockAEAD)
+	if !errors.Is(err, keyset.ErrEmptyPath) {
+		t.Fatalf("expected ErrEmptyPath, got: %v", err)
 	}
 }
 

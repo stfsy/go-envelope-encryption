@@ -2,12 +2,14 @@ package keyset
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 
 	"github.com/tink-crypto/tink-go/v2/aead"
+	"github.com/tink-crypto/tink-go/v2/core/registry"
 	tinkkeyset "github.com/tink-crypto/tink-go/v2/keyset"
 	tinkpb "github.com/tink-crypto/tink-go/v2/proto/tink_go_proto"
 	"github.com/tink-crypto/tink-go/v2/tink"
@@ -46,24 +48,30 @@ var supportedAEADTypes = map[string]bool{
 	"type.googleapis.com/google.crypto.tink.ChaCha20Poly1305Key":  true,
 }
 
-// ValidateAEADTemplate verifies that the provided key template is a supported AEAD algorithm.
+// ValidateAEADTemplate verifies that the provided key template is a supported AEAD algorithm
+// and that its protobuf Value field can be instantiated by the Tink registry.
 func ValidateAEADTemplate(template *tinkpb.KeyTemplate) error {
 	if template == nil {
-		return nil
+		return ErrUnsupportedKeyType
 	}
 	if !supportedAEADTypes[template.GetTypeUrl()] {
 		return fmt.Errorf("%w: %q", ErrUnsupportedKeyType, template.GetTypeUrl())
 	}
+	if _, err := registry.NewKeyData(template); err != nil {
+		return fmt.Errorf("%w: invalid key template value: %w", ErrUnsupportedKeyType, err)
+	}
 	return nil
 }
 
-func validateAEADTemplate(template *tinkpb.KeyTemplate) error {
-	return ValidateAEADTemplate(template)
-}
-
-// LoadEncryptedKeyset reads a JSON-serialized keyset from r and unwraps it using masterKey.
+// LoadEncryptedKeysetWithContext reads a JSON-serialized keyset from r and unwraps it using masterKey with context support.
 // A bounded reader is used to prevent memory exhaustion if r is oversized or infinite.
-func LoadEncryptedKeyset(r io.Reader, masterKey tink.AEAD) (*tinkkeyset.Handle, error) {
+func LoadEncryptedKeysetWithContext(ctx context.Context, r io.Reader, masterKey tink.AEAD) (*tinkkeyset.Handle, error) {
+	if ctx == nil {
+		return nil, errors.New("keyset: context cannot be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if masterKey == nil {
 		return nil, ErrNilMasterKey
 	}
@@ -73,22 +81,42 @@ func LoadEncryptedKeyset(r io.Reader, masterKey tink.AEAD) (*tinkkeyset.Handle, 
 
 	buf, err := io.ReadAll(io.LimitReader(r, MaxKeysetJSONSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to read keyset: %v", ErrInvalidKeyset, err)
+		return nil, fmt.Errorf("%w: failed to read keyset: %w", ErrInvalidKeyset, err)
 	}
 	if len(buf) > MaxKeysetJSONSize {
 		return nil, ErrKeysetTooLarge
 	}
 
 	reader := tinkkeyset.NewJSONReader(bytes.NewReader(buf))
-	handle, err := tinkkeyset.Read(reader, masterKey)
+	var handle *tinkkeyset.Handle
+	if pwc, ok := masterKey.(tink.AEADWithContext); ok {
+		handle, err = tinkkeyset.ReadWithContext(ctx, reader, pwc, []byte{})
+	} else {
+		handle, err = tinkkeyset.Read(reader, masterKey)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to read and unwrap keyset: %v", ErrInvalidKeyset, err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: failed to read and unwrap keyset: %w", ErrInvalidKeyset, err)
 	}
 	return handle, nil
 }
 
-// LoadMountedSecret opens a secret file mounted at path and unwraps the keyset using masterKey.
-func LoadMountedSecret(path string, masterKey tink.AEAD) (*tinkkeyset.Handle, error) {
+// LoadEncryptedKeyset reads a JSON-serialized keyset from r and unwraps it using masterKey.
+// A bounded reader is used to prevent memory exhaustion if r is oversized or infinite.
+func LoadEncryptedKeyset(r io.Reader, masterKey tink.AEAD) (*tinkkeyset.Handle, error) {
+	return LoadEncryptedKeysetWithContext(context.Background(), r, masterKey)
+}
+
+// LoadMountedSecretWithContext opens a secret file mounted at path and unwraps the keyset using masterKey with context support.
+func LoadMountedSecretWithContext(ctx context.Context, path string, masterKey tink.AEAD) (*tinkkeyset.Handle, error) {
+	if ctx == nil {
+		return nil, errors.New("keyset: context cannot be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if path == "" {
 		return nil, ErrEmptyPath
 	}
@@ -100,7 +128,12 @@ func LoadMountedSecret(path string, masterKey tink.AEAD) (*tinkkeyset.Handle, er
 		_ = f.Close()
 	}()
 
-	return LoadEncryptedKeyset(f, masterKey)
+	return LoadEncryptedKeysetWithContext(ctx, f, masterKey)
+}
+
+// LoadMountedSecret opens a secret file mounted at path and unwraps the keyset using masterKey.
+func LoadMountedSecret(path string, masterKey tink.AEAD) (*tinkkeyset.Handle, error) {
+	return LoadMountedSecretWithContext(context.Background(), path, masterKey)
 }
 
 // GenerateEncryptedKeyset creates a new keyset with template and writes the KMS-encrypted JSON to w.
@@ -114,7 +147,7 @@ func GenerateEncryptedKeyset(w io.Writer, masterKey tink.AEAD, template *tinkpb.
 	if template == nil {
 		template = AES256GCM
 	}
-	if err := validateAEADTemplate(template); err != nil {
+	if err := ValidateAEADTemplate(template); err != nil {
 		return err
 	}
 
